@@ -43,11 +43,17 @@ import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.background
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.ui.layout.ContentScale
 import androidx.camera.core.AspectRatio
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+
 
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
@@ -83,118 +89,200 @@ fun LandmarkRecognitionApp(
     val permissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
     var capturedImage by remember { mutableStateOf<Bitmap?>(null) }
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
+    var shouldCapture by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    Column(
-        Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // 1) Permission screen
-        if (!permissionState.status.isGranted) {
-            Column(
-                Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text("Camera permission is required", fontSize = 16.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = { permissionState.launchPermissionRequest() }) {
-                    Text("Request permission")
-                }
+    // Permission screen
+    if (!permissionState.status.isGranted) {
+        Column(
+            Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("Camera permission is required", fontSize = 16.sp)
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { permissionState.launchPermissionRequest() }) {
+                Text("Request permission")
             }
-            return@Column
         }
+        return
+    }
 
-        // Title
-        Text(
-            text = "Landmark Recognition",
-            fontSize = 20.sp,
-            modifier = Modifier.padding(vertical = 16.dp)
-        )
-
-        // 2) Camera Preview or Captured Image in 1:1 Box
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Background
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f) // This creates 1:1 ratio
-                .background(Color.Gray.copy(alpha = 0.3f))
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.9f))
+        )
+
+        // Main content
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (capturedImage == null) {
-                // Camera Preview
-                CameraPreview(
-                    onImageCaptured = { bmp ->
-                        // Crop the bitmap to square before storing
-                        capturedImage = cropToSquare(bmp)
-                        detectedLandmarks = emptyList()
-                    },
-                    cameraExecutor = cameraExecutor,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                // Show captured image (already cropped to square)
-                Image(
-                    bitmap = capturedImage!!.asImageBitmap(),
-                    contentDescription = "Captured",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        }
+            // Title
+            Text(
+                text = "Landmark Recognition",
+                fontSize = 20.sp,
+                color = Color.White,
+                modifier = Modifier.padding(top = 32.dp, bottom = 16.dp)
+            )
 
-        Spacer(Modifier.height(16.dp))
+            // Spacer to center the camera preview vertically
+            Spacer(modifier = Modifier.weight(1f))
 
-        // 3) Buttons Section
-        if (capturedImage != null) {
-            // Predict button
-            Button(
-                onClick = {
-                    scope.launch {
-                        val labels = try {
-                            withContext(Dispatchers.Default) {
-                                landmarkClassifier.classify(capturedImage!!)
-                            }
-                        } catch (e: Exception) {
-                            Log.e("Classifier", "error", e)
-                            emptyList<String>()
-                        }
-                        detectedLandmarks = labels
-                    }
-                },
+            // 1:1 Camera Preview Box - Centered
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
+                    .fillMaxWidth(0.8f) // 80% of screen width
+                    .aspectRatio(1f) // 1:1 ratio
+                    .background(Color.Gray.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                    .clip(RoundedCornerShape(16.dp))
             ) {
-                Text("Predict Landmark")
+                if (capturedImage == null) {
+                    // Camera Preview with square cropping overlay
+                    CameraPreview(
+                        onImageCaptured = { bmp ->
+                            capturedImage = cropToSquare(bmp)
+                            detectedLandmarks = emptyList()
+                        },
+                        cameraExecutor = cameraExecutor,
+                        modifier = Modifier.fillMaxSize(),
+                        shouldCapture = shouldCapture,
+                        onCaptureProcessed = { shouldCapture = false }
+                    )
+
+                    // Square overlay to show crop area
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .border(2.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                    )
+                } else {
+                    // Show captured square image
+                    Image(
+                        bitmap = capturedImage!!.asImageBitmap(),
+                        contentDescription = "Captured",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
 
-            // Retake button
-            Button(
-                onClick = {
-                    capturedImage = null
-                    detectedLandmarks = emptyList()
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Text("Retake Photo")
-            }
-        }
+            // Spacer to center the camera preview vertically
+            Spacer(modifier = Modifier.weight(1f))
 
-        // 4) Results Section
-        if (detectedLandmarks.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.8f))
-            ) {
-                Column(
-                    Modifier.padding(16.dp)
+            // Results Section - Shows after prediction (between image and buttons)
+            if (detectedLandmarks.isNotEmpty()) {
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .padding(horizontal = 16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.Black.copy(alpha = 0.8f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
                 ) {
-                    Text("Detected Landmark:", color = Color.White, fontSize = 16.sp)
-                    Spacer(Modifier.height(8.dp))
-                    detectedLandmarks.forEach { landmark ->
-                        Text(landmark, color = Color.White, fontSize = 14.sp)
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "Detected Landmark:",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        detectedLandmarks.forEach { landmark ->
+                            Text(
+                                landmark,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Bottom section with buttons
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (capturedImage == null) {
+                    // Shutter button - outside camera preview
+                    Button(
+                        onClick = {
+                            shouldCapture = true // Trigger capture
+                        },
+                        modifier = Modifier
+                            .size(80.dp),
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Red,
+                            contentColor = Color.White
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp)
+                    ) {
+                        // Camera icon or circle
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .background(Color.White, CircleShape)
+                        )
+                    }
+                } else {
+                    // Action buttons when image is captured
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        // Retake button
+                        Button(
+                            onClick = {
+                                capturedImage = null
+                                detectedLandmarks = emptyList()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Gray,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Retake")
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Predict button
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    val labels = try {
+                                        withContext(Dispatchers.Default) {
+                                            landmarkClassifier.classify(capturedImage!!)
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("Classifier", "error", e)
+                                        emptyList<String>()
+                                    }
+                                    detectedLandmarks = labels
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Blue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Predict")
+                        }
                     }
                 }
             }
@@ -206,20 +294,26 @@ fun LandmarkRecognitionApp(
 fun CameraPreview(
     onImageCaptured: (Bitmap) -> Unit,
     cameraExecutor: ExecutorService,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    shouldCapture: Boolean = false,
+    onCaptureProcessed: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context) }
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
 
+    // Configure PreviewView to show square crop
+    LaunchedEffect(previewView) {
+        previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
+    }
+
     LaunchedEffect(previewView) {
         val provider = context.getCameraProvider()
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
 
-        // Configure preview to maintain aspect ratio
         val preview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3) // This helps with cropping
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
@@ -232,43 +326,36 @@ fun CameraPreview(
         provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
     }
 
-    Box(modifier = modifier, contentAlignment = Alignment.BottomCenter) {
-        AndroidView(
-            factory = { previewView },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // Capture button
-        Button(
-            onClick = {
-                imageCapture?.takePicture(
-                    ContextCompat.getMainExecutor(context),
-                    object : ImageCapture.OnImageCapturedCallback() {
-                        override fun onCaptureSuccess(image: ImageProxy) {
-                            try {
-                                val bmp = image.toBitmap()
-                                onImageCaptured(bmp)
-                            } catch (e: Exception) {
-                                Log.e("Capture", "YUV→Bitmap failed", e)
-                            } finally {
-                                image.close()
-                            }
-                        }
-                        override fun onError(exc: ImageCaptureException) {
-                            Log.e("CameraCapture", "failed", exc)
+    // Handle capture when triggered externally
+    LaunchedEffect(shouldCapture) {
+        if (shouldCapture && imageCapture != null) {
+            imageCapture?.takePicture(
+                ContextCompat.getMainExecutor(context),
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        try {
+                            val bmp = image.toBitmap()
+                            onImageCaptured(bmp)
+                        } catch (e: Exception) {
+                            Log.e("Capture", "YUV→Bitmap failed", e)
+                        } finally {
+                            image.close()
                         }
                     }
-                )
-            },
-            modifier = Modifier
-                .padding(16.dp)
-                .size(60.dp),
-            shape = CircleShape,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.White)
-        ) {
-            // You can add a camera icon here if needed
+                    override fun onError(exc: ImageCaptureException) {
+                        Log.e("CameraCapture", "failed", exc)
+                    }
+                }
+            )
+            onCaptureProcessed() // Reset the capture trigger
         }
     }
+
+    // Camera preview
+    AndroidView(
+        factory = { previewView },
+        modifier = modifier
+    )
 }
 
 // Helper extensions unchanged from the “optimized” version:
