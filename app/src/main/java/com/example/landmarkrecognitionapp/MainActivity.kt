@@ -10,6 +10,9 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.location.Address
+import android.location.Geocoder
+import android.location.Location
 import android.os.Bundle
 import android.os.Environment
 import android.util.Log
@@ -36,10 +39,16 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
-import com.google.accompanist.permissions.rememberPermissionState
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -68,17 +77,19 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var landmarkClassifier: LandmarkClassifier
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         landmarkClassifier = LandmarkClassifier(this)
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         // Use cached thread pool for better performance
         cameraExecutor = Executors.newCachedThreadPool()
 
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    LandmarkRecognitionApp(landmarkClassifier, cameraExecutor)
+                    LandmarkRecognitionApp(landmarkClassifier, cameraExecutor, fusedLocationClient)
                 }
             }
         }
@@ -95,30 +106,65 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun LandmarkRecognitionApp(
     landmarkClassifier: LandmarkClassifier,
-    cameraExecutor: ExecutorService
+    cameraExecutor: ExecutorService,
+    fusedLocationClient: FusedLocationProviderClient
 ) {
-    val permissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
+    val permissionsState = rememberMultiplePermissionsState(
+        permissions = listOf(
+            android.Manifest.permission.CAMERA,
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+    )
+
     var capturedImage by remember { mutableStateOf<Bitmap?>(null) }
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
     var shouldCapture by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
     var showSaveDialog by remember { mutableStateOf(false) }
+    var currentLocation by remember { mutableStateOf<String?>(null) }
+    var isLoadingLocation by remember { mutableStateOf(false) }
+    var locationError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-
+    // Check if all required permissions are granted
+    val allPermissionsGranted = permissionsState.allPermissionsGranted
 
     // Permission screen
-    if (!permissionState.status.isGranted) {
+    if (!allPermissionsGranted) {
         Column(
             Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Text("Camera permission is required", fontSize = 16.sp)
+            Text(
+                "Camera and Location permissions are required",
+                fontSize = 16.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp)
+            )
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { permissionState.launchPermissionRequest() }) {
-                Text("Request permission")
+
+            // Show which permissions are missing
+            val missingPermissions = permissionsState.permissions.filter { !it.status.isGranted }
+            missingPermissions.forEach { permission ->
+                val permissionName = when (permission.permission) {
+                    android.Manifest.permission.CAMERA -> "Camera"
+                    android.Manifest.permission.ACCESS_FINE_LOCATION -> "Fine Location"
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION -> "Coarse Location"
+                    else -> "Unknown"
+                }
+                Text(
+                    "• $permissionName permission needed",
+                    fontSize = 12.sp,
+                    color = androidx.compose.ui.graphics.Color.Gray
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { permissionsState.launchMultiplePermissionRequest() }) {
+                Text("Request permissions")
             }
         }
         return
@@ -129,29 +175,29 @@ fun LandmarkRecognitionApp(
         AlertDialog(
             onDismissRequest = { showSaveDialog = false },
             title = { Text("Save Image") },
-            text = { Text("How would you like to save the image?") },
+            text = { Text("Do you want to save the image with the prediction result?") },
             confirmButton = {
                 Row {
                     TextButton(
                         onClick = {
                             showSaveDialog = false
                             scope.launch {
-                                saveImageWithPrediction(context, capturedImage!!, detectedLandmarks)
+                                saveImageWithPrediction(context, capturedImage!!, detectedLandmarks, currentLocation)
                             }
                         }
                     ) {
-                        Text("With Prediction")
+                        Text("Yes")
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     TextButton(
                         onClick = {
                             showSaveDialog = false
                             scope.launch {
-                                saveImageWithoutPrediction(context, capturedImage!!)
+                                saveImageWithoutPrediction(context, capturedImage!!, currentLocation)
                             }
                         }
                     ) {
-                        Text("Without Prediction")
+                        Text("No")
                     }
                 }
             },
@@ -201,6 +247,23 @@ fun LandmarkRecognitionApp(
                             capturedImage = bmp
                             detectedLandmarks = emptyList()
                             isProcessing = false
+                            currentLocation = null
+                            locationError = null
+
+                            // Start location retrieval after image is captured
+                            scope.launch {
+                                isLoadingLocation = true
+                                try {
+                                    val location = getCurrentLocation(context, fusedLocationClient)
+                                    currentLocation = location
+                                    locationError = null
+                                } catch (e: Exception) {
+                                    locationError = "Failed to get location"
+                                    Log.e("Location", "Failed to get location", e)
+                                } finally {
+                                    isLoadingLocation = false
+                                }
+                            }
                         },
                         cameraExecutor = cameraExecutor,
                         modifier = Modifier.fillMaxSize(),
@@ -239,6 +302,69 @@ fun LandmarkRecognitionApp(
 
             // Spacer to center the camera preview vertically
             Spacer(modifier = Modifier.weight(1f))
+
+            // Location Section
+            if (capturedImage != null) {
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .padding(horizontal = 16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.8f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "Location:",
+                            color = androidx.compose.ui.graphics.Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+
+                        when {
+                            isLoadingLocation -> {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        color = androidx.compose.ui.graphics.Color.White,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Fetching location...",
+                                        color = androidx.compose.ui.graphics.Color.White,
+                                        fontSize = 14.sp
+                                    )
+                                }
+                            }
+                            locationError != null -> {
+                                Text(
+                                    locationError!!,
+                                    color = androidx.compose.ui.graphics.Color.Red,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                            currentLocation != null -> {
+                                Text(
+                                    currentLocation!!,
+                                    color = androidx.compose.ui.graphics.Color.White,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             // Results Section
             if (detectedLandmarks.isNotEmpty()) {
@@ -316,6 +442,9 @@ fun LandmarkRecognitionApp(
                                 capturedImage = null
                                 detectedLandmarks = emptyList()
                                 isProcessing = false
+                                currentLocation = null
+                                isLoadingLocation = false
+                                locationError = null
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = androidx.compose.ui.graphics.Color.Gray,
@@ -371,7 +500,7 @@ fun LandmarkRecognitionApp(
                                     showSaveDialog = true
                                 } else {
                                     scope.launch {
-                                        saveImageWithoutPrediction(context, capturedImage!!)
+                                        saveImageWithoutPrediction(context, capturedImage!!, currentLocation)
                                     }
                                 }
                             },
@@ -475,11 +604,81 @@ fun CameraPreview(
     )
 }
 
-// Save Functions
-suspend fun saveImageWithPrediction(context: Context, bitmap: Bitmap, predictions: List<String>) {
+// Location Functions
+suspend fun getCurrentLocation(context: Context, fusedLocationClient: FusedLocationProviderClient): String {
+    return withContext(Dispatchers.IO) {
+        try {
+            // Check for location permissions
+            if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                throw SecurityException("Location permissions not granted")
+            }
+
+            // Get current location with timeout
+            val location = withTimeoutOrNull(10000L) { // 10 second timeout
+                val cancellationTokenSource = CancellationTokenSource()
+                fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cancellationTokenSource.token
+                ).await()
+            } ?: throw Exception("Location request timed out")
+
+            // Convert coordinates to address
+            getAddressFromLocation(context, location.latitude, location.longitude)
+
+        } catch (e: Exception) {
+            Log.e("Location", "Error getting location", e)
+            throw e
+        }
+    }
+}
+
+private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
+    return try {
+        val geocoder = Geocoder(context, Locale.getDefault())
+        val addresses: List<Address> = geocoder.getFromLocation(latitude, longitude, 1) ?: emptyList()
+
+        if (addresses.isNotEmpty()) {
+            val address = addresses[0]
+            buildString {
+                // Add venue name if available
+                address.featureName?.let { if (it.isNotBlank()) append("at $it, ") }
+
+                // Add sub-locality (district)
+                address.subLocality?.let { if (it.isNotBlank()) append("$it, ") }
+
+                // Add locality (city)
+                address.locality?.let { if (it.isNotBlank()) append("$it, ") }
+
+                // Add admin area (state/province)
+                address.adminArea?.let { if (it.isNotBlank()) append(it) }
+
+                // If nothing specific found, use the address line
+                if (this.isEmpty()) {
+                    address.getAddressLine(0)?.let { append(it) }
+                }
+
+                // Fallback to coordinates
+                if (this.isEmpty()) {
+                    append("${String.format("%.6f", latitude)}, ${String.format("%.6f", longitude)}")
+                }
+            }.toString().removeSuffix(", ")
+        } else {
+            "Location: ${String.format("%.6f", latitude)}, ${String.format("%.6f", longitude)}"
+        }
+    } catch (e: Exception) {
+        Log.e("Geocoding", "Error converting coordinates to address", e)
+        "Location: ${String.format("%.6f", latitude)}, ${String.format("%.6f", longitude)}"
+    }
+}
+
+// Updated Save Functions with Location
+suspend fun saveImageWithPrediction(context: Context, bitmap: Bitmap, predictions: List<String>, location: String?) {
     withContext(Dispatchers.IO) {
         try {
-            val imageWithPrediction = addPredictionOverlay(bitmap, predictions)
+            val imageWithPrediction = addPredictionOverlay(bitmap, predictions, location)
             val fileName = "landmark_with_prediction_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
             saveImageToGallery(context, imageWithPrediction, fileName)
 
@@ -495,11 +694,16 @@ suspend fun saveImageWithPrediction(context: Context, bitmap: Bitmap, prediction
     }
 }
 
-suspend fun saveImageWithoutPrediction(context: Context, bitmap: Bitmap) {
+suspend fun saveImageWithoutPrediction(context: Context, bitmap: Bitmap, location: String?) {
     withContext(Dispatchers.IO) {
         try {
+            val imageWithLocation = if (location != null) {
+                addLocationOverlay(bitmap, location)
+            } else {
+                bitmap
+            }
             val fileName = "landmark_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
-            saveImageToGallery(context, bitmap, fileName)
+            saveImageToGallery(context, imageWithLocation, fileName)
 
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, "Image saved!", Toast.LENGTH_SHORT).show()
@@ -513,14 +717,14 @@ suspend fun saveImageWithoutPrediction(context: Context, bitmap: Bitmap) {
     }
 }
 
-private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>): Bitmap {
+private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>, location: String?): Bitmap {
     val overlayBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
     val canvas = Canvas(overlayBitmap)
 
     // Configure text paint
     val textPaint = Paint().apply {
         color = Color.WHITE
-        textSize = bitmap.width * 0.04f // Scale text size based on image width
+        textSize = bitmap.width * 0.02f // Scale text size based on image width
         isAntiAlias = true
         style = Paint.Style.FILL
         setShadowLayer(4f, 2f, 2f, Color.BLACK) // Add shadow for better visibility
@@ -533,31 +737,90 @@ private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>): Bit
         style = Paint.Style.FILL
     }
 
-    if (predictions.isNotEmpty()) {
-        val predictionText = predictions.joinToString("\n")
+    // Combine predictions and location
+    val overlayText = buildString {
+        if (predictions.isNotEmpty()) {
+            append("Landmark: ${predictions.joinToString(", ")}")
+        }
+        if (location != null) {
+            if (isNotEmpty()) append("\n")
+            append("Location: $location")
+        }
+    }
+
+
+
+
+    if (overlayText.isNotEmpty()) {
         val textBounds = Rect()
-        textPaint.getTextBounds(predictionText, 0, predictionText.length, textBounds)
+        textPaint.getTextBounds(overlayText, 0, overlayText.length, textBounds)
 
         val padding = 20f
-        val backgroundWidth = textBounds.width() + padding * 2
-        val backgroundHeight = textBounds.height() + padding * 2
+        val lines = overlayText.split("\n")
+        val maxLineWidth = lines.maxOfOrNull { line ->
+            val bounds = Rect()
+            textPaint.getTextBounds(line, 0, line.length, bounds)
+            bounds.width()
+        } ?: 0
+
+        val backgroundWidth = maxLineWidth + padding * 2
+        val backgroundHeight = (textPaint.textSize + 5f) * lines.size + padding * 2
 
         // Position in bottom-right corner
-        val x = bitmap.width - backgroundWidth - 20f
+        val x = 20f
         val y = bitmap.height - backgroundHeight - 20f
 
         // Draw background
         canvas.drawRect(x, y, x + backgroundWidth, y + backgroundHeight, backgroundPaint)
 
         // Draw text
-        val lines = predictionText.split("\n")
-        var textY = y + padding + textBounds.height()
-
+        var textY = y + padding + textPaint.textSize
         for (line in lines) {
             canvas.drawText(line, x + padding, textY, textPaint)
             textY += textPaint.textSize + 5f
         }
     }
+
+    return overlayBitmap
+}
+
+private fun addLocationOverlay(bitmap: Bitmap, location: String): Bitmap {
+    val overlayBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+    val canvas = Canvas(overlayBitmap)
+
+    // Configure text paint
+    val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = bitmap.width * 0.02f // Scale text size based on image width
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        setShadowLayer(4f, 2f, 2f, Color.BLACK) // Add shadow for better visibility
+    }
+
+    // Configure background paint
+    val backgroundPaint = Paint().apply {
+        color = Color.BLACK
+        alpha = 180 // Semi-transparent background
+        style = Paint.Style.FILL
+    }
+
+    val overlayText = "Location: $location"
+    val textBounds = Rect()
+    textPaint.getTextBounds(overlayText, 0, overlayText.length, textBounds)
+
+    val padding = 20f
+    val backgroundWidth = textBounds.width() + padding * 2
+    val backgroundHeight = textBounds.height() + padding * 2
+
+    // Position in bottom-right corner
+    val x = 20f
+    val y = bitmap.height - backgroundHeight - 20f
+
+    // Draw background
+    canvas.drawRect(x, y, x + backgroundWidth, y + backgroundHeight, backgroundPaint)
+
+    // Draw text
+    canvas.drawText(overlayText, x + padding, y + padding + textBounds.height(), textPaint)
 
     return overlayBitmap
 }
