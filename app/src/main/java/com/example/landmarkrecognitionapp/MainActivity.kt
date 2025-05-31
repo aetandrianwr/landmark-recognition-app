@@ -53,6 +53,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import android.content.ContentValues
+
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.Toast
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
+
 
 
 class MainActivity : ComponentActivity() {
@@ -90,6 +98,8 @@ fun LandmarkRecognitionApp(
     var capturedImage by remember { mutableStateOf<Bitmap?>(null) }
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
     var shouldCapture by remember { mutableStateOf(false) }
+    var captureButtonEnabled by remember { mutableStateOf(true) }
+    var isProcessing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // Permission screen
@@ -219,16 +229,25 @@ fun LandmarkRecognitionApp(
                     // Shutter button - outside camera preview
                     Button(
                         onClick = {
-                            shouldCapture = true // Trigger capture
+                            Log.d("LandmarkApp", "Shutter button clicked")
+                            if (captureButtonEnabled && !shouldCapture) {
+                                shouldCapture = true
+                                captureButtonEnabled = false
+                                // Re-enable after delay
+                                scope.launch {
+                                    kotlinx.coroutines.delay(2000)
+                                    captureButtonEnabled = true
+                                }
+                            }
                         },
-                        modifier = Modifier
-                            .size(80.dp),
+                        modifier = Modifier.size(80.dp),
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.Red,
+                            containerColor = if (captureButtonEnabled) Color.Red else Color.Gray,
                             contentColor = Color.White
                         ),
-                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp)
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp),
+                        enabled = captureButtonEnabled && !shouldCapture
                     ) {
                         // Camera icon or circle
                         Box(
@@ -237,6 +256,14 @@ fun LandmarkRecognitionApp(
                                 .background(Color.White, CircleShape)
                         )
                     }
+
+                    // Debug text
+                    Text(
+                        "Capture: $shouldCapture, Enabled: $captureButtonEnabled",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
                 } else {
                     // Action buttons when image is captured
                     Row(
@@ -246,8 +273,12 @@ fun LandmarkRecognitionApp(
                         // Retake button
                         Button(
                             onClick = {
+                                Log.d("LandmarkApp", "Retake button clicked")
                                 capturedImage = null
                                 detectedLandmarks = emptyList()
+                                isProcessing = false
+                                captureButtonEnabled = true
+                                shouldCapture = false
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color.Gray,
@@ -263,25 +294,41 @@ fun LandmarkRecognitionApp(
                         // Predict button
                         Button(
                             onClick = {
+                                Log.d("LandmarkApp", "Predict button clicked")
+                                isProcessing = true
                                 scope.launch {
-                                    val labels = try {
-                                        withContext(Dispatchers.Default) {
-                                            landmarkClassifier.classify(capturedImage!!)
+                                    try {
+                                        val labels = withContext(Dispatchers.Default) {
+                                            Log.d("LandmarkApp", "Starting classification...")
+                                            val result = landmarkClassifier.classify(capturedImage!!)
+                                            Log.d("LandmarkApp", "Classification result: $result")
+                                            result
                                         }
+
+                                        // Ensure we always have some result
+                                        detectedLandmarks = if (labels.isEmpty()) {
+                                            listOf("No landmark detected")
+                                        } else {
+                                            labels
+                                        }
+
+                                        Log.d("LandmarkApp", "Final detected landmarks: $detectedLandmarks")
                                     } catch (e: Exception) {
-                                        Log.e("Classifier", "error", e)
-                                        emptyList<String>()
+                                        Log.e("Classifier", "Classification error", e)
+                                        detectedLandmarks = listOf("Error: ${e.message}")
+                                    } finally {
+                                        isProcessing = false
                                     }
-                                    detectedLandmarks = labels
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color.Blue,
+                                containerColor = if (isProcessing) Color.Gray else Color.Blue,
                                 contentColor = Color.White
                             ),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            enabled = !isProcessing
                         ) {
-                            Text("Predict")
+                            Text(if (isProcessing) "Processing..." else "Predict")
                         }
                     }
                 }
@@ -302,6 +349,7 @@ fun CameraPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context) }
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
+    var isCameraReady by remember { mutableStateOf(false) }
 
     // Configure PreviewView to show square crop
     LaunchedEffect(previewView) {
@@ -309,46 +357,62 @@ fun CameraPreview(
     }
 
     LaunchedEffect(previewView) {
-        val provider = context.getCameraProvider()
-        val selector = CameraSelector.DEFAULT_BACK_CAMERA
+        try {
+            val provider = context.getCameraProvider()
+            val selector = CameraSelector.DEFAULT_BACK_CAMERA
 
-        val preview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .build()
-            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val preview = Preview.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .build()
+            val imageCaptureBuilder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
 
-        provider.unbindAll()
-        provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            imageCapture = imageCaptureBuilder.build()
+
+            provider.unbindAll()
+            provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+
+            isCameraReady = true
+            Log.d("CameraPreview", "Camera setup complete")
+        } catch (e: Exception) {
+            Log.e("CameraPreview", "Failed to setup camera", e)
+        }
     }
 
-    // Handle capture when triggered externally
+    // Handle capture when triggered externally with better error handling
     LaunchedEffect(shouldCapture) {
-        if (shouldCapture && imageCapture != null) {
-            imageCapture?.takePicture(
-                ContextCompat.getMainExecutor(context),
-                object : ImageCapture.OnImageCapturedCallback() {
-                    override fun onCaptureSuccess(image: ImageProxy) {
-                        try {
-                            val bmp = image.toBitmap()
-                            val rotated = rotateBitmap(bmp, image.imageInfo.rotationDegrees)
-                            onImageCaptured(rotated)
-                        } catch (e: Exception) {
-                            Log.e("Capture", "YUV→Bitmap failed", e)
-                        } finally {
-                            image.close()
+        if (shouldCapture && isCameraReady && imageCapture != null) {
+            Log.d("CameraPreview", "Attempting to capture image")
+            try {
+                imageCapture?.takePicture(
+                    ContextCompat.getMainExecutor(context),
+                    object : ImageCapture.OnImageCapturedCallback() {
+                        override fun onCaptureSuccess(image: ImageProxy) {
+                            Log.d("CameraPreview", "Image captured successfully")
+                            try {
+                                val bmp = image.toBitmap()
+                                val rotated = rotateBitmap(bmp, image.imageInfo.rotationDegrees)
+                                onImageCaptured(rotated)
+                            } catch (e: Exception) {
+                                Log.e("Capture", "YUV→Bitmap conversion failed", e)
+                            } finally {
+                                image.close()
+                            }
+                        }
+                        override fun onError(exc: ImageCaptureException) {
+                            Log.e("CameraCapture", "Image capture failed", exc)
                         }
                     }
-                    override fun onError(exc: ImageCaptureException) {
-                        Log.e("CameraCapture", "failed", exc)
-                    }
-                }
-            )
-            onCaptureProcessed() // Reset the capture trigger
+                )
+            } finally {
+                onCaptureProcessed() // Always reset the capture trigger
+            }
+        } else if (shouldCapture) {
+            Log.w("CameraPreview", "Capture requested but camera not ready. Ready: $isCameraReady, ImageCapture: ${imageCapture != null}")
+            onCaptureProcessed() // Reset trigger if camera not ready
         }
     }
 
@@ -357,6 +421,148 @@ fun CameraPreview(
         factory = { previewView },
         modifier = modifier
     )
+}
+
+@Composable
+fun SaveImageDialog(
+    onDismiss: () -> Unit,
+    onSaveWithPrediction: () -> Unit,
+    onSaveWithoutPrediction: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Save Image",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Text(
+                text = "Choose how you want to save the image:",
+                fontSize = 14.sp
+            )
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Save with prediction button
+                Button(
+                    onClick = onSaveWithPrediction,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Blue
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Save with Prediction")
+                }
+
+                // Save without prediction button
+                Button(
+                    onClick = onSaveWithoutPrediction,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Gray
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Save Original Image")
+                }
+
+                // Cancel button
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Cancel")
+                }
+            }
+        },
+        dismissButton = null
+    )
+}
+
+// Function to add prediction text to image
+private fun addPredictionToImage(bitmap: Bitmap, prediction: String): Bitmap {
+    val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+    val canvas = android.graphics.Canvas(mutableBitmap)
+
+    // Configure text paint
+    val textPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.WHITE
+        textSize = bitmap.width * 0.04f // 4% of image width
+        isAntiAlias = true
+        style = android.graphics.Paint.Style.FILL
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+
+    // Configure background paint
+    val backgroundPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.BLACK
+        alpha = 180 // Semi-transparent
+        style = android.graphics.Paint.Style.FILL
+    }
+
+    // Measure text
+    val textBounds = android.graphics.Rect()
+    textPaint.getTextBounds(prediction, 0, prediction.length, textBounds)
+
+    // Calculate position (bottom-right corner with padding)
+    val padding = bitmap.width * 0.02f // 2% padding
+    val textWidth = textBounds.width()
+    val textHeight = textBounds.height()
+
+    val textX = bitmap.width - textWidth - padding
+    val textY = bitmap.height - padding
+
+    // Draw background rectangle
+    val backgroundRect = android.graphics.RectF(
+        textX - padding * 0.5f,
+        textY - textHeight - padding * 0.5f,
+        textX + textWidth + padding * 0.5f,
+        textY + padding * 0.5f
+    )
+
+    canvas.drawRoundRect(backgroundRect, padding * 0.3f, padding * 0.3f, backgroundPaint)
+
+    // Draw text
+    canvas.drawText(prediction, textX, textY, textPaint)
+
+    return mutableBitmap
+}
+
+// Function to save image to gallery
+private suspend fun saveImageToGallery(context: Context, bitmap: Bitmap, filename: String) {
+    withContext(Dispatchers.IO) {
+        try {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "${filename}_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/LandmarkRecognition")
+            }
+
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+
+            uri?.let { imageUri ->
+                resolver.openOutputStream(imageUri)?.use { outputStream ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
+                }
+
+                // Show success message on main thread
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Image saved to Gallery", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Failed to save image: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            Log.e("SaveImage", "Error saving image", e)
+        }
+    }
 }
 
 // Helper extensions unchanged from the “optimized” version:
