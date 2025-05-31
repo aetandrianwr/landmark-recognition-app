@@ -3,12 +3,17 @@ package com.example.landmarkrecognitionapp
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Bundle
+import android.os.Environment
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.camera.core.*
@@ -22,7 +27,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -37,7 +41,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -54,6 +61,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import java.util.Date
+import java.util.Locale
 
 
 class MainActivity : ComponentActivity() {
@@ -93,7 +102,11 @@ fun LandmarkRecognitionApp(
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
     var shouldCapture by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
+    var showSaveDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+
 
     // Permission screen
     if (!permissionState.status.isGranted) {
@@ -111,12 +124,51 @@ fun LandmarkRecognitionApp(
         return
     }
 
+    // Save Dialog
+    if (showSaveDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveDialog = false },
+            title = { Text("Save Image") },
+            text = { Text("How would you like to save the image?") },
+            confirmButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            showSaveDialog = false
+                            scope.launch {
+                                saveImageWithPrediction(context, capturedImage!!, detectedLandmarks)
+                            }
+                        }
+                    ) {
+                        Text("With Prediction")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(
+                        onClick = {
+                            showSaveDialog = false
+                            scope.launch {
+                                saveImageWithoutPrediction(context, capturedImage!!)
+                            }
+                        }
+                    ) {
+                        Text("Without Prediction")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSaveDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         // Background
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.9f))
+                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.9f))
         )
 
         // Main content
@@ -128,7 +180,7 @@ fun LandmarkRecognitionApp(
             Text(
                 text = "Landmark Recognition",
                 fontSize = 20.sp,
-                color = Color.White,
+                color = androidx.compose.ui.graphics.Color.White,
                 modifier = Modifier.padding(top = 32.dp, bottom = 16.dp)
             )
 
@@ -140,7 +192,7 @@ fun LandmarkRecognitionApp(
                 modifier = Modifier
                     .fillMaxWidth(0.8f)
                     .aspectRatio(1f)
-                    .background(Color.Gray.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                    .background(androidx.compose.ui.graphics.Color.Gray.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
             ) {
                 if (capturedImage == null) {
@@ -161,7 +213,7 @@ fun LandmarkRecognitionApp(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .border(2.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                            .border(2.dp, androidx.compose.ui.graphics.Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                     )
                 } else {
                     Image(
@@ -177,10 +229,10 @@ fun LandmarkRecognitionApp(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.5f)),
+                            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = Color.White)
+                        CircularProgressIndicator(color = androidx.compose.ui.graphics.Color.White)
                     }
                 }
             }
@@ -196,7 +248,7 @@ fun LandmarkRecognitionApp(
                         .fillMaxWidth(0.8f)
                         .padding(horizontal = 16.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = Color.Black.copy(alpha = 0.8f)
+                        containerColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.8f)
                     ),
                     elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
                 ) {
@@ -206,7 +258,7 @@ fun LandmarkRecognitionApp(
                     ) {
                         Text(
                             "Detected Landmark:",
-                            color = Color.White,
+                            color = androidx.compose.ui.graphics.Color.White,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -214,7 +266,7 @@ fun LandmarkRecognitionApp(
                         detectedLandmarks.forEach { landmark ->
                             Text(
                                 landmark,
-                                color = Color.White,
+                                color = androidx.compose.ui.graphics.Color.White,
                                 fontSize = 14.sp,
                                 textAlign = TextAlign.Center
                             )
@@ -242,8 +294,8 @@ fun LandmarkRecognitionApp(
                             .size(80.dp),
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isProcessing) Color.Gray else Color.Red,
-                            contentColor = Color.White
+                            containerColor = if (isProcessing) androidx.compose.ui.graphics.Color.Gray else androidx.compose.ui.graphics.Color.Red,
+                            contentColor = androidx.compose.ui.graphics.Color.White
                         ),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp),
                         enabled = !isProcessing
@@ -251,7 +303,7 @@ fun LandmarkRecognitionApp(
                         Box(
                             modifier = Modifier
                                 .size(20.dp)
-                                .background(Color.White, CircleShape)
+                                .background(androidx.compose.ui.graphics.Color.White, CircleShape)
                         )
                     }
                 } else {
@@ -266,15 +318,15 @@ fun LandmarkRecognitionApp(
                                 isProcessing = false
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color.Gray,
-                                contentColor = Color.White
+                                containerColor = androidx.compose.ui.graphics.Color.Gray,
+                                contentColor = androidx.compose.ui.graphics.Color.White
                             ),
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("Retake")
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         Button(
                             onClick = {
@@ -294,8 +346,8 @@ fun LandmarkRecognitionApp(
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isProcessing) Color.Gray else Color.Blue,
-                                contentColor = Color.White
+                                containerColor = if (isProcessing) androidx.compose.ui.graphics.Color.Gray else androidx.compose.ui.graphics.Color.Blue,
+                                contentColor = androidx.compose.ui.graphics.Color.White
                             ),
                             modifier = Modifier.weight(1f),
                             enabled = !isProcessing
@@ -303,12 +355,33 @@ fun LandmarkRecognitionApp(
                             if (isProcessing) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
-                                    color = Color.White,
+                                    color = androidx.compose.ui.graphics.Color.White,
                                     strokeWidth = 2.dp
                                 )
                             } else {
                                 Text("Predict")
                             }
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Button(
+                            onClick = {
+                                if (detectedLandmarks.isNotEmpty()) {
+                                    showSaveDialog = true
+                                } else {
+                                    scope.launch {
+                                        saveImageWithoutPrediction(context, capturedImage!!)
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = androidx.compose.ui.graphics.Color.Green,
+                                contentColor = androidx.compose.ui.graphics.Color.White
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Save")
                         }
                     }
                 }
@@ -399,6 +472,113 @@ fun CameraPreview(
     AndroidView(
         factory = { previewView },
         modifier = modifier
+    )
+}
+
+// Save Functions
+suspend fun saveImageWithPrediction(context: Context, bitmap: Bitmap, predictions: List<String>) {
+    withContext(Dispatchers.IO) {
+        try {
+            val imageWithPrediction = addPredictionOverlay(bitmap, predictions)
+            val fileName = "landmark_with_prediction_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
+            saveImageToGallery(context, imageWithPrediction, fileName)
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Image saved with prediction!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("SaveImage", "Failed to save image with prediction", e)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+
+suspend fun saveImageWithoutPrediction(context: Context, bitmap: Bitmap) {
+    withContext(Dispatchers.IO) {
+        try {
+            val fileName = "landmark_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
+            saveImageToGallery(context, bitmap, fileName)
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Image saved!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("SaveImage", "Failed to save image", e)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+
+private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>): Bitmap {
+    val overlayBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+    val canvas = Canvas(overlayBitmap)
+
+    // Configure text paint
+    val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = bitmap.width * 0.04f // Scale text size based on image width
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        setShadowLayer(4f, 2f, 2f, Color.BLACK) // Add shadow for better visibility
+    }
+
+    // Configure background paint
+    val backgroundPaint = Paint().apply {
+        color = Color.BLACK
+        alpha = 180 // Semi-transparent background
+        style = Paint.Style.FILL
+    }
+
+    if (predictions.isNotEmpty()) {
+        val predictionText = predictions.joinToString("\n")
+        val textBounds = Rect()
+        textPaint.getTextBounds(predictionText, 0, predictionText.length, textBounds)
+
+        val padding = 20f
+        val backgroundWidth = textBounds.width() + padding * 2
+        val backgroundHeight = textBounds.height() + padding * 2
+
+        // Position in bottom-right corner
+        val x = bitmap.width - backgroundWidth - 20f
+        val y = bitmap.height - backgroundHeight - 20f
+
+        // Draw background
+        canvas.drawRect(x, y, x + backgroundWidth, y + backgroundHeight, backgroundPaint)
+
+        // Draw text
+        val lines = predictionText.split("\n")
+        var textY = y + padding + textBounds.height()
+
+        for (line in lines) {
+            canvas.drawText(line, x + padding, textY, textPaint)
+            textY += textPaint.textSize + 5f
+        }
+    }
+
+    return overlayBitmap
+}
+
+private fun saveImageToGallery(context: Context, bitmap: Bitmap, fileName: String) {
+    val picturesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "LandmarkRecognition")
+    if (!picturesDir.exists()) {
+        picturesDir.mkdirs()
+    }
+
+    val imageFile = File(picturesDir, fileName)
+    FileOutputStream(imageFile).use { out ->
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+    }
+
+    // Notify media scanner to make the image visible in gallery
+    android.media.MediaScannerConnection.scanFile(
+        context,
+        arrayOf(imageFile.absolutePath),
+        arrayOf("image/jpeg"),
+        null
     )
 }
 
