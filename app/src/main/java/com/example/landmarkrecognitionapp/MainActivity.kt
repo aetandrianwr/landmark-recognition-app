@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -53,14 +54,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import android.content.ContentValues
-
-import android.os.Environment
-import android.provider.MediaStore
-import android.widget.Toast
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedButton
-
 
 
 class MainActivity : ComponentActivity() {
@@ -70,7 +63,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         landmarkClassifier = LandmarkClassifier(this)
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        // Use cached thread pool for better performance
+        cameraExecutor = Executors.newCachedThreadPool()
 
         setContent {
             MaterialTheme {
@@ -98,7 +92,6 @@ fun LandmarkRecognitionApp(
     var capturedImage by remember { mutableStateOf<Bitmap?>(null) }
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
     var shouldCapture by remember { mutableStateOf(false) }
-    var captureButtonEnabled by remember { mutableStateOf(true) }
     var isProcessing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -145,22 +138,23 @@ fun LandmarkRecognitionApp(
             // 1:1 Camera Preview Box - Centered
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(0.8f) // 80% of screen width
-                    .aspectRatio(1f) // 1:1 ratio
+                    .fillMaxWidth(0.8f)
+                    .aspectRatio(1f)
                     .background(Color.Gray.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
             ) {
                 if (capturedImage == null) {
-                    // Camera Preview with square cropping overlay
                     CameraPreview(
                         onImageCaptured = { bmp ->
-                            capturedImage = cropToSquare(bmp)
+                            capturedImage = bmp
                             detectedLandmarks = emptyList()
+                            isProcessing = false
                         },
                         cameraExecutor = cameraExecutor,
                         modifier = Modifier.fillMaxSize(),
                         shouldCapture = shouldCapture,
-                        onCaptureProcessed = { shouldCapture = false }
+                        onCaptureProcessed = { shouldCapture = false },
+                        onCaptureStarted = { isProcessing = true }
                     )
 
                     // Square overlay to show crop area
@@ -170,7 +164,6 @@ fun LandmarkRecognitionApp(
                             .border(2.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                     )
                 } else {
-                    // Show captured square image
                     Image(
                         bitmap = capturedImage!!.asImageBitmap(),
                         contentDescription = "Captured",
@@ -178,12 +171,24 @@ fun LandmarkRecognitionApp(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
+
+                // Processing indicator
+                if (isProcessing) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.5f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+                }
             }
 
             // Spacer to center the camera preview vertically
             Spacer(modifier = Modifier.weight(1f))
 
-            // Results Section - Shows after prediction (between image and buttons)
+            // Results Section
             if (detectedLandmarks.isNotEmpty()) {
                 Spacer(Modifier.height(16.dp))
                 Card(
@@ -226,59 +231,39 @@ fun LandmarkRecognitionApp(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (capturedImage == null) {
-                    // Shutter button - outside camera preview
+                    // Shutter button
                     Button(
                         onClick = {
-                            Log.d("LandmarkApp", "Shutter button clicked")
-                            if (captureButtonEnabled && !shouldCapture) {
+                            if (!isProcessing) {
                                 shouldCapture = true
-                                captureButtonEnabled = false
-                                // Re-enable after delay
-                                scope.launch {
-                                    kotlinx.coroutines.delay(2000)
-                                    captureButtonEnabled = true
-                                }
                             }
                         },
-                        modifier = Modifier.size(80.dp),
+                        modifier = Modifier
+                            .size(80.dp),
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (captureButtonEnabled) Color.Red else Color.Gray,
+                            containerColor = if (isProcessing) Color.Gray else Color.Red,
                             contentColor = Color.White
                         ),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp),
-                        enabled = captureButtonEnabled && !shouldCapture
+                        enabled = !isProcessing
                     ) {
-                        // Camera icon or circle
                         Box(
                             modifier = Modifier
                                 .size(20.dp)
                                 .background(Color.White, CircleShape)
                         )
                     }
-
-                    // Debug text
-                    Text(
-                        "Capture: $shouldCapture, Enabled: $captureButtonEnabled",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 10.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
                 } else {
-                    // Action buttons when image is captured
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        // Retake button
                         Button(
                             onClick = {
-                                Log.d("LandmarkApp", "Retake button clicked")
                                 capturedImage = null
                                 detectedLandmarks = emptyList()
                                 isProcessing = false
-                                captureButtonEnabled = true
-                                shouldCapture = false
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color.Gray,
@@ -291,34 +276,21 @@ fun LandmarkRecognitionApp(
 
                         Spacer(modifier = Modifier.width(16.dp))
 
-                        // Predict button
                         Button(
                             onClick = {
-                                Log.d("LandmarkApp", "Predict button clicked")
-                                isProcessing = true
                                 scope.launch {
-                                    try {
-                                        val labels = withContext(Dispatchers.Default) {
-                                            Log.d("LandmarkApp", "Starting classification...")
-                                            val result = landmarkClassifier.classify(capturedImage!!)
-                                            Log.d("LandmarkApp", "Classification result: $result")
-                                            result
+                                    isProcessing = true
+                                    val labels = try {
+                                        withContext(Dispatchers.Default) {
+                                            landmarkClassifier.classify(capturedImage!!)
                                         }
-
-                                        // Ensure we always have some result
-                                        detectedLandmarks = if (labels.isEmpty()) {
-                                            listOf("No landmark detected")
-                                        } else {
-                                            labels
-                                        }
-
-                                        Log.d("LandmarkApp", "Final detected landmarks: $detectedLandmarks")
                                     } catch (e: Exception) {
                                         Log.e("Classifier", "Classification error", e)
-                                        detectedLandmarks = listOf("Error: ${e.message}")
+                                        emptyList<String>()
                                     } finally {
                                         isProcessing = false
                                     }
+                                    detectedLandmarks = labels
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -328,7 +300,15 @@ fun LandmarkRecognitionApp(
                             modifier = Modifier.weight(1f),
                             enabled = !isProcessing
                         ) {
-                            Text(if (isProcessing) "Processing..." else "Predict")
+                            if (isProcessing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Predict")
+                            }
                         }
                     }
                 }
@@ -343,230 +323,87 @@ fun CameraPreview(
     cameraExecutor: ExecutorService,
     modifier: Modifier = Modifier,
     shouldCapture: Boolean = false,
-    onCaptureProcessed: () -> Unit = {}
+    onCaptureProcessed: () -> Unit = {},
+    onCaptureStarted: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context) }
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
-    var isCameraReady by remember { mutableStateOf(false) }
 
-    // Configure PreviewView to show square crop
+    // Configure PreviewView
     LaunchedEffect(previewView) {
         previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
     }
 
     LaunchedEffect(previewView) {
-        try {
-            val provider = context.getCameraProvider()
-            val selector = CameraSelector.DEFAULT_BACK_CAMERA
+        val provider = context.getCameraProvider()
+        val selector = CameraSelector.DEFAULT_BACK_CAMERA
 
-            val preview = Preview.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .build()
-                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .build()
+            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-            val imageCaptureBuilder = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+        // Optimized ImageCapture configuration
+        imageCapture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setJpegQuality(85) // Reduce quality for faster processing
+            .build()
 
-            imageCapture = imageCaptureBuilder.build()
-
-            provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
-
-            isCameraReady = true
-            Log.d("CameraPreview", "Camera setup complete")
-        } catch (e: Exception) {
-            Log.e("CameraPreview", "Failed to setup camera", e)
-        }
+        provider.unbindAll()
+        provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
     }
 
-    // Handle capture when triggered externally with better error handling
+    // Optimized capture handling
     LaunchedEffect(shouldCapture) {
-        if (shouldCapture && isCameraReady && imageCapture != null) {
-            Log.d("CameraPreview", "Attempting to capture image")
-            try {
-                imageCapture?.takePicture(
-                    ContextCompat.getMainExecutor(context),
-                    object : ImageCapture.OnImageCapturedCallback() {
-                        override fun onCaptureSuccess(image: ImageProxy) {
-                            Log.d("CameraPreview", "Image captured successfully")
-                            try {
-                                val bmp = image.toBitmap()
-                                val rotated = rotateBitmap(bmp, image.imageInfo.rotationDegrees)
-                                onImageCaptured(rotated)
-                            } catch (e: Exception) {
-                                Log.e("Capture", "YUV→Bitmap conversion failed", e)
-                            } finally {
-                                image.close()
+        if (shouldCapture && imageCapture != null) {
+            onCaptureStarted()
+
+            imageCapture?.takePicture(
+                cameraExecutor, // Use background executor
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        try {
+                            val bmp = image.toBitmapOptimized()
+                            val rotated = rotateBitmapOptimized(bmp, image.imageInfo.rotationDegrees)
+                            val cropped = cropToSquareOptimized(rotated)
+
+                            // Switch back to main thread for UI update
+                            ContextCompat.getMainExecutor(context).execute {
+                                onImageCaptured(cropped)
                             }
-                        }
-                        override fun onError(exc: ImageCaptureException) {
-                            Log.e("CameraCapture", "Image capture failed", exc)
+                        } catch (e: Exception) {
+                            Log.e("Capture", "Image processing failed", e)
+                            ContextCompat.getMainExecutor(context).execute {
+                                onCaptureProcessed()
+                            }
+                        } finally {
+                            image.close()
                         }
                     }
-                )
-            } finally {
-                onCaptureProcessed() // Always reset the capture trigger
-            }
-        } else if (shouldCapture) {
-            Log.w("CameraPreview", "Capture requested but camera not ready. Ready: $isCameraReady, ImageCapture: ${imageCapture != null}")
-            onCaptureProcessed() // Reset trigger if camera not ready
+
+                    override fun onError(exc: ImageCaptureException) {
+                        Log.e("CameraCapture", "Capture failed", exc)
+                        ContextCompat.getMainExecutor(context).execute {
+                            onCaptureProcessed()
+                        }
+                    }
+                }
+            )
+            onCaptureProcessed()
         }
     }
 
-    // Camera preview
     AndroidView(
         factory = { previewView },
         modifier = modifier
     )
 }
 
-@Composable
-fun SaveImageDialog(
-    onDismiss: () -> Unit,
-    onSaveWithPrediction: () -> Unit,
-    onSaveWithoutPrediction: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "Save Image",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        },
-        text = {
-            Text(
-                text = "Choose how you want to save the image:",
-                fontSize = 14.sp
-            )
-        },
-        confirmButton = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Save with prediction button
-                Button(
-                    onClick = onSaveWithPrediction,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.Blue
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save with Prediction")
-                }
-
-                // Save without prediction button
-                Button(
-                    onClick = onSaveWithoutPrediction,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.Gray
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save Original Image")
-                }
-
-                // Cancel button
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Cancel")
-                }
-            }
-        },
-        dismissButton = null
-    )
-}
-
-// Function to add prediction text to image
-private fun addPredictionToImage(bitmap: Bitmap, prediction: String): Bitmap {
-    val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-    val canvas = android.graphics.Canvas(mutableBitmap)
-
-    // Configure text paint
-    val textPaint = android.graphics.Paint().apply {
-        color = android.graphics.Color.WHITE
-        textSize = bitmap.width * 0.04f // 4% of image width
-        isAntiAlias = true
-        style = android.graphics.Paint.Style.FILL
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
-    }
-
-    // Configure background paint
-    val backgroundPaint = android.graphics.Paint().apply {
-        color = android.graphics.Color.BLACK
-        alpha = 180 // Semi-transparent
-        style = android.graphics.Paint.Style.FILL
-    }
-
-    // Measure text
-    val textBounds = android.graphics.Rect()
-    textPaint.getTextBounds(prediction, 0, prediction.length, textBounds)
-
-    // Calculate position (bottom-right corner with padding)
-    val padding = bitmap.width * 0.02f // 2% padding
-    val textWidth = textBounds.width()
-    val textHeight = textBounds.height()
-
-    val textX = bitmap.width - textWidth - padding
-    val textY = bitmap.height - padding
-
-    // Draw background rectangle
-    val backgroundRect = android.graphics.RectF(
-        textX - padding * 0.5f,
-        textY - textHeight - padding * 0.5f,
-        textX + textWidth + padding * 0.5f,
-        textY + padding * 0.5f
-    )
-
-    canvas.drawRoundRect(backgroundRect, padding * 0.3f, padding * 0.3f, backgroundPaint)
-
-    // Draw text
-    canvas.drawText(prediction, textX, textY, textPaint)
-
-    return mutableBitmap
-}
-
-// Function to save image to gallery
-private suspend fun saveImageToGallery(context: Context, bitmap: Bitmap, filename: String) {
-    withContext(Dispatchers.IO) {
-        try {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "${filename}_${System.currentTimeMillis()}.jpg")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/LandmarkRecognition")
-            }
-
-            val resolver = context.contentResolver
-            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-
-            uri?.let { imageUri ->
-                resolver.openOutputStream(imageUri)?.use { outputStream ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
-                }
-
-                // Show success message on main thread
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Image saved to Gallery", Toast.LENGTH_SHORT).show()
-                }
-            }
-        } catch (e: Exception) {
-            withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Failed to save image: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-            Log.e("SaveImage", "Error saving image", e)
-        }
-    }
-}
-
-// Helper extensions unchanged from the “optimized” version:
-private fun cropToSquare(bitmap: Bitmap): Bitmap {
+// Optimized helper functions
+private fun cropToSquareOptimized(bitmap: Bitmap): Bitmap {
     val dimension = minOf(bitmap.width, bitmap.height)
     val xOffset = (bitmap.width - dimension) / 2
     val yOffset = (bitmap.height - dimension) / 2
@@ -574,22 +411,66 @@ private fun cropToSquare(bitmap: Bitmap): Bitmap {
     return Bitmap.createBitmap(bitmap, xOffset, yOffset, dimension, dimension)
 }
 
-private fun ImageProxy.toBitmap(): Bitmap {
-    val y = planes[0].buffer; val u = planes[1].buffer; val v = planes[2].buffer
-    val ySize = y.remaining(); val uSize = u.remaining(); val vSize = v.remaining()
-    val nv21 = ByteArray(ySize + uSize + vSize)
-    y.get(nv21, 0, ySize)
-    v.get(nv21, ySize, vSize)
-    u.get(nv21, ySize + vSize, uSize)
+private fun ImageProxy.toBitmapOptimized(): Bitmap {
+    return when (format) {
+        ImageFormat.JPEG -> {
+            // Direct JPEG decoding - fastest path
+            val buffer = planes[0].buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+        ImageFormat.YUV_420_888 -> {
+            // Optimized YUV conversion with pre-allocated arrays
+            val yBuffer = planes[0].buffer
+            val uBuffer = planes[1].buffer
+            val vBuffer = planes[2].buffer
 
-    val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-    val out = ByteArrayOutputStream().also { yuv.compressToJpeg(Rect(0,0,width,height), 100, it) }
-    val jpeg = out.toByteArray()
-    return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+            val ySize = yBuffer.remaining()
+            val uSize = uBuffer.remaining()
+            val vSize = vBuffer.remaining()
+
+            val nv21 = ByteArray(ySize + uSize + vSize)
+
+            // Copy Y plane
+            yBuffer.get(nv21, 0, ySize)
+
+            // Interleave U and V for NV21 format
+            val uvPixelStride = planes[1].pixelStride
+            if (uvPixelStride == 1) {
+                // Packed format
+                vBuffer.get(nv21, ySize, vSize)
+                uBuffer.get(nv21, ySize + vSize, uSize)
+            } else {
+                // Semi-planar format - need to interleave manually
+                val uvBuffer = ByteArray(uSize + vSize)
+                vBuffer.get(uvBuffer, 0, vSize)
+                uBuffer.get(uvBuffer, vSize, uSize)
+                System.arraycopy(uvBuffer, 0, nv21, ySize, uvBuffer.size)
+            }
+
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+            val out = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
+            val imageBytes = out.toByteArray()
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        }
+        else -> {
+            // Fallback for other formats
+            val buffer = planes[0].buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+    }
 }
 
-private fun rotateBitmap(bitmap: Bitmap, rotation: Int): Bitmap {
-    val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+private fun rotateBitmapOptimized(bitmap: Bitmap, rotation: Int): Bitmap {
+    if (rotation == 0) return bitmap
+
+    val matrix = Matrix().apply {
+        postRotate(rotation.toFloat())
+    }
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
 
@@ -599,6 +480,3 @@ suspend fun Context.getCameraProvider(): ProcessCameraProvider =
             future.addListener({ cont.resume(future.get()) }, ContextCompat.getMainExecutor(this))
         }
     }
-
-
-// This is a test change for Git 2
