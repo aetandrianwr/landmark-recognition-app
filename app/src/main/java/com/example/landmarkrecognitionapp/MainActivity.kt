@@ -42,6 +42,12 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.background
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.ui.layout.ContentScale
+import androidx.camera.core.AspectRatio
 
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
@@ -79,11 +85,14 @@ fun LandmarkRecognitionApp(
     var detectedLandmarks by remember { mutableStateOf<List<String>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
-    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        Modifier.fillMaxSize().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         // 1) Permission screen
         if (!permissionState.status.isGranted) {
             Column(
-                Modifier.fillMaxSize().padding(16.dp),
+                Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -96,42 +105,47 @@ fun LandmarkRecognitionApp(
             return@Column
         }
 
-        // 2) If no photo yet → show camera preview
-        if (capturedImage == null) {
-            Box(Modifier.weight(1f)) {
+        // Title
+        Text(
+            text = "Landmark Recognition",
+            fontSize = 20.sp,
+            modifier = Modifier.padding(vertical = 16.dp)
+        )
+
+        // 2) Camera Preview or Captured Image in 1:1 Box
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f) // This creates 1:1 ratio
+                .background(Color.Gray.copy(alpha = 0.3f))
+        ) {
+            if (capturedImage == null) {
+                // Camera Preview
                 CameraPreview(
                     onImageCaptured = { bmp ->
-                        capturedImage = bmp
+                        // Crop the bitmap to square before storing
+                        capturedImage = cropToSquare(bmp)
                         detectedLandmarks = emptyList()
                     },
-                    cameraExecutor = cameraExecutor
+                    cameraExecutor = cameraExecutor,
+                    modifier = Modifier.fillMaxSize()
                 )
-                // capture button
-//                Box(
-//                    Modifier.fillMaxWidth().padding(bottom = 20.dp),
-//                    contentAlignment = Alignment.BottomCenter
-//                ) {
-//                    IconButton(
-//                        onClick = { /* handled inside CameraPreview */ },
-//                        modifier = Modifier
-//                            .size(80.dp)
-//                            .background(Color.White.copy(alpha = 0.5f), CircleShape)
-//                    ) {
-//                        // empty— preview composable already has its own button
-//                    }
-//                }
+            } else {
+                // Show captured image (already cropped to square)
+                Image(
+                    bitmap = capturedImage!!.asImageBitmap(),
+                    contentDescription = "Captured",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
-        } else {
-            // 3) Show captured image
-            Image(
-                bitmap = capturedImage!!.asImageBitmap(),
-                contentDescription = "Captured",
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            )
+        }
 
-            // 4) Predict button
+        Spacer(Modifier.height(16.dp))
+
+        // 3) Buttons Section
+        if (capturedImage != null) {
+            // Predict button
             Button(
                 onClick = {
                     scope.launch {
@@ -148,37 +162,41 @@ fun LandmarkRecognitionApp(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp)
+                    .padding(vertical = 8.dp)
             ) {
                 Text("Predict Landmark")
             }
 
-            // 5) Display results
-            if (detectedLandmarks.isNotEmpty()) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.7f))
-                        .padding(16.dp)
-                ) {
-                    Text("Detected:", color = Color.White, fontSize = 16.sp)
-                    Spacer(Modifier.height(4.dp))
-                    detectedLandmarks.forEach {
-                        Text(it, color = Color.White, fontSize = 14.sp)
-                    }
-                }
-            }
-
-            // 6) Retake button
-            Spacer(Modifier.height(16.dp))
+            // Retake button
             Button(
                 onClick = {
                     capturedImage = null
                     detectedLandmarks = emptyList()
                 },
-                modifier = Modifier.padding(bottom = 16.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
             ) {
-                Text("Retake")
+                Text("Retake Photo")
+            }
+        }
+
+        // 4) Results Section
+        if (detectedLandmarks.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.8f))
+            ) {
+                Column(
+                    Modifier.padding(16.dp)
+                ) {
+                    Text("Detected Landmark:", color = Color.White, fontSize = 16.sp)
+                    Spacer(Modifier.height(8.dp))
+                    detectedLandmarks.forEach { landmark ->
+                        Text(landmark, color = Color.White, fontSize = 14.sp)
+                    }
+                }
             }
         }
     }
@@ -187,7 +205,8 @@ fun LandmarkRecognitionApp(
 @Composable
 fun CameraPreview(
     onImageCaptured: (Bitmap) -> Unit,
-    cameraExecutor: ExecutorService
+    cameraExecutor: ExecutorService,
+    modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -197,22 +216,29 @@ fun CameraPreview(
     LaunchedEffect(previewView) {
         val provider = context.getCameraProvider()
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
+
+        // Configure preview to maintain aspect ratio
         val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3) // This helps with cropping
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
         imageCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .build()
 
         provider.unbindAll()
         provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
     }
 
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-        AndroidView({ previewView }, Modifier.fillMaxSize())
+    Box(modifier = modifier, contentAlignment = Alignment.BottomCenter) {
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize()
+        )
 
-        // Single capture button
+        // Capture button
         Button(
             onClick = {
                 imageCapture?.takePicture(
@@ -235,15 +261,24 @@ fun CameraPreview(
                 )
             },
             modifier = Modifier
-                .padding(bottom = 20.dp)
-                .size(80.dp)
-                .background(Color.White.copy(alpha = 0.5f), CircleShape),
+                .padding(16.dp)
+                .size(60.dp),
+            shape = CircleShape,
             colors = ButtonDefaults.buttonColors(containerColor = Color.White)
-        ) { /* Icon or empty */ }
+        ) {
+            // You can add a camera icon here if needed
+        }
     }
 }
 
 // Helper extensions unchanged from the “optimized” version:
+private fun cropToSquare(bitmap: Bitmap): Bitmap {
+    val dimension = minOf(bitmap.width, bitmap.height)
+    val xOffset = (bitmap.width - dimension) / 2
+    val yOffset = (bitmap.height - dimension) / 2
+
+    return Bitmap.createBitmap(bitmap, xOffset, yOffset, dimension, dimension)
+}
 
 private fun ImageProxy.toBitmap(): Bitmap {
     val y = planes[0].buffer; val u = planes[1].buffer; val v = planes[2].buffer
