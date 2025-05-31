@@ -10,6 +10,10 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Address
 import android.location.Geocoder
 import android.location.Location
@@ -45,6 +49,8 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -72,24 +78,101 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import java.util.Date
 import java.util.Locale
+import kotlin.math.sqrt
 
+// Add StabilityMonitor class
+class StabilityMonitor(context: Context) : SensorEventListener {
+    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+    private val _isShaky = MutableStateFlow(false)
+    val isShaky: StateFlow<Boolean> = _isShaky
+
+    // Stability parameters
+    private val shakeThreshold = 2.5f // Sensitivity threshold
+    private val stabilityWindowMs = 500L // Time window to confirm stability
+    private var lastUpdate = 0L
+    private var lastShakeTime = 0L
+
+    // Previous acceleration values for comparison
+    private var lastX = 0f
+    private var lastY = 0f
+    private var lastZ = 0f
+
+    fun startMonitoring() {
+        accelerometer?.let { sensor ->
+            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    fun stopMonitoring() {
+        sensorManager.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
+            val currentTime = System.currentTimeMillis()
+
+            // Only update if enough time has passed (throttle updates)
+            if (currentTime - lastUpdate > 100) { // Update every 100ms
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+
+                if (lastUpdate != 0L) {
+                    // Calculate the change in acceleration
+                    val deltaX = x - lastX
+                    val deltaY = y - lastY
+                    val deltaZ = z - lastZ
+
+                    // Calculate magnitude of acceleration change
+                    val accelerationMagnitude = sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ)
+
+                    // Check if device is shaking
+                    if (accelerationMagnitude > shakeThreshold) {
+                        lastShakeTime = currentTime
+                        if (!_isShaky.value) {
+                            _isShaky.value = true
+                        }
+                    } else {
+                        // Check if device has been stable for the required time window
+                        if (_isShaky.value && (currentTime - lastShakeTime) > stabilityWindowMs) {
+                            _isShaky.value = false
+                        }
+                    }
+                }
+
+                lastX = x
+                lastY = y
+                lastZ = z
+                lastUpdate = currentTime
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // Not needed for this implementation
+    }
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var landmarkClassifier: LandmarkClassifier
     private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private lateinit var stabilityMonitor: StabilityMonitor
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         landmarkClassifier = LandmarkClassifier(this)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        stabilityMonitor = StabilityMonitor(this)
         // Use cached thread pool for better performance
         cameraExecutor = Executors.newCachedThreadPool()
 
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    LandmarkRecognitionApp(landmarkClassifier, cameraExecutor, fusedLocationClient)
+                    LandmarkRecognitionApp(landmarkClassifier, cameraExecutor, fusedLocationClient, stabilityMonitor)
                 }
             }
         }
@@ -99,6 +182,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         cameraExecutor.shutdown()
         landmarkClassifier.close()
+        stabilityMonitor.stopMonitoring()
     }
 }
 
@@ -107,7 +191,8 @@ class MainActivity : ComponentActivity() {
 fun LandmarkRecognitionApp(
     landmarkClassifier: LandmarkClassifier,
     cameraExecutor: ExecutorService,
-    fusedLocationClient: FusedLocationProviderClient
+    fusedLocationClient: FusedLocationProviderClient,
+    stabilityMonitor: StabilityMonitor
 ) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = listOf(
@@ -127,6 +212,24 @@ fun LandmarkRecognitionApp(
     var locationError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // Monitor stability state
+    val isShaky by stabilityMonitor.isShaky.collectAsState()
+
+    // Start/stop stability monitoring based on camera preview state
+    DisposableEffect(capturedImage) {
+        if (capturedImage == null) {
+            // Camera preview is active, start monitoring
+            stabilityMonitor.startMonitoring()
+        } else {
+            // Camera preview is not active, stop monitoring
+            stabilityMonitor.stopMonitoring()
+        }
+
+        onDispose {
+            stabilityMonitor.stopMonitoring()
+        }
+    }
 
     // Check if all required permissions are granted
     val allPermissionsGranted = permissionsState.allPermissionsGranted
@@ -233,7 +336,41 @@ fun LandmarkRecognitionApp(
             // Spacer to center the camera preview vertically
             Spacer(modifier = Modifier.weight(1f))
 
-            // 1:1 Camera Preview Box - Centered
+            if (capturedImage == null && isShaky) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .padding(bottom = 16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = androidx.compose.ui.graphics.Color.Red.copy(alpha = 0.9f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            "⚠️",
+                            fontSize = 20.sp,
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                        Text(
+                            "Too shaky – hold your device steady",
+                            color = androidx.compose.ui.graphics.Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+
+// 1:1 Camera Preview Box - Centered
             Box(
                 modifier = Modifier
                     .fillMaxWidth(0.8f)
@@ -278,6 +415,10 @@ fun LandmarkRecognitionApp(
                             .fillMaxSize()
                             .border(2.dp, androidx.compose.ui.graphics.Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                     )
+
+                    // REMOVE THE OLD STABILITY WARNING FROM HERE
+                    // The stability warning overlay code should be deleted from inside this Box
+
                 } else {
                     Image(
                         bitmap = capturedImage!!.asImageBitmap(),
@@ -747,9 +888,6 @@ private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>, loca
             append("Location: $location")
         }
     }
-
-
-
 
     if (overlayText.isNotEmpty()) {
         val textBounds = Rect()
