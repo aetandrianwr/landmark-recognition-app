@@ -335,7 +335,8 @@ fun CameraPreview(
                     override fun onCaptureSuccess(image: ImageProxy) {
                         try {
                             val bmp = image.toBitmap()
-                            onImageCaptured(bmp)
+                            val rotated = rotateBitmap(bmp, image.imageInfo.rotationDegrees)
+                            onImageCaptured(rotated)
                         } catch (e: Exception) {
                             Log.e("Capture", "YUV→Bitmap failed", e)
                         } finally {
