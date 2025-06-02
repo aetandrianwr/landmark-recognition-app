@@ -79,6 +79,7 @@ import androidx.compose.ui.text.style.TextAlign
 import java.util.Date
 import java.util.Locale
 import kotlin.math.sqrt
+import java.io.IOException
 
 // Add StabilityMonitor class
 class StabilityMonitor(context: Context) : SensorEventListener {
@@ -169,6 +170,8 @@ class MainActivity : ComponentActivity() {
         // Use cached thread pool for better performance
         cameraExecutor = Executors.newCachedThreadPool()
 
+        //testClassifierWithAssets()
+
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -177,6 +180,87 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // TESTING PREDICTION CLASSIFIER
+//    private fun testClassifierWithAssets() {
+//        Log.d("LandmarkTest", "Starting classifier test...")
+//
+//        try {
+//            // First, check what files are in assets
+//            val assetFiles = assets.list("")
+//            Log.d("LandmarkTest", "Files in assets folder:")
+//            println("=== ASSETS FOLDER CONTENTS ===")
+//            assetFiles?.forEach { fileName ->
+//                Log.d("LandmarkTest", "  - $fileName")
+//                println("  - $fileName")
+//            }
+//            println()
+//
+//            // Test images (adjust these names to match your actual files)
+//            val testImages = listOf(
+//                "mm1.jpg",
+//                "mm2.jpg"
+//            )
+//
+//            var successCount = 0
+//            println("=== CLASSIFIER TEST RESULTS ===")
+//
+//            testImages.forEach { imageName ->
+//                try {
+//                    Log.d("LandmarkTest", "Testing: $imageName")
+//                    println("Testing: $imageName")
+//
+//                    // Load image from assets
+//                    assets.open(imageName).use { inputStream ->
+//                        val bitmap = BitmapFactory.decodeStream(inputStream)
+//                        if (bitmap != null) {
+//                            Log.d("LandmarkTest", "✓ Loaded bitmap: ${bitmap.width}x${bitmap.height}")
+//
+//                            // Classify the image
+//                            val results = landmarkClassifier.classify(bitmap)
+//
+//                            Log.d("LandmarkTest", "✓ Results: $results")
+//                            println("✓ Results: ${results.joinToString(", ")}")
+//
+//                            successCount++
+//                            bitmap.recycle() // Clean up memory
+//                        } else {
+//                            Log.w("LandmarkTest", "✗ Failed to decode $imageName")
+//                            println("✗ Failed to decode $imageName")
+//                        }
+//                    }
+//
+//                } catch (e: IOException) {
+//                    Log.w("LandmarkTest", "✗ Could not load $imageName: ${e.message}")
+//                    println("✗ Could not load $imageName (file not found)")
+//                } catch (e: Exception) {
+//                    Log.e("LandmarkTest", "✗ Error processing $imageName", e)
+//                    println("✗ Error processing $imageName: ${e.message}")
+//                }
+//                println() // Add spacing between results
+//            }
+//
+//
+//
+//            println()
+//            println("=== SUMMARY ===")
+//            println("Successfully processed: $successCount/${testImages.size} asset images")
+//            Log.d("LandmarkTest", "Test completed. Success: $successCount/${testImages.size}")
+//
+//            if (successCount == 0) {
+//                println("❌ No images processed successfully. Check:")
+//                println("  1. Image files exist in app/src/main/assets/")
+//                println("  2. Image file names match exactly (case-sensitive)")
+//                println("  3. TensorFlow model file exists in assets")
+//            } else {
+//                println("✅ Test completed successfully!")
+//            }
+//
+//        } catch (e: Exception) {
+//            Log.e("LandmarkTest", "Error during testing", e)
+//            println("❌ Error during testing: ${e.message}")
+//        }
+//    }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -524,7 +608,7 @@ fun LandmarkRecognitionApp(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            "Detected Landmark:",
+                            "Detected Batik Motif:",
                             color = androidx.compose.ui.graphics.Color.White,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
@@ -745,6 +829,9 @@ fun CameraPreview(
     )
 }
 
+
+
+
 // Location Functions
 suspend fun getCurrentLocation(context: Context, fusedLocationClient: FusedLocationProviderClient): String {
     return withContext(Dispatchers.IO) {
@@ -820,7 +907,7 @@ suspend fun saveImageWithPrediction(context: Context, bitmap: Bitmap, prediction
     withContext(Dispatchers.IO) {
         try {
             val imageWithPrediction = addPredictionOverlay(bitmap, predictions, location)
-            val fileName = "landmark_with_prediction_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
+            val fileName = "Batik_with_prediction_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
             saveImageToGallery(context, imageWithPrediction, fileName)
 
             withContext(Dispatchers.Main) {
@@ -843,7 +930,7 @@ suspend fun saveImageWithoutPrediction(context: Context, bitmap: Bitmap, locatio
             } else {
                 bitmap
             }
-            val fileName = "landmark_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
+            val fileName = "Batik_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
             saveImageToGallery(context, imageWithLocation, fileName)
 
             withContext(Dispatchers.Main) {
@@ -881,7 +968,7 @@ private fun addPredictionOverlay(bitmap: Bitmap, predictions: List<String>, loca
     // Combine predictions and location
     val overlayText = buildString {
         if (predictions.isNotEmpty()) {
-            append("Landmark: ${predictions.joinToString(", ")}")
+            append("Batik Motif: ${predictions.joinToString(", ")}")
         }
         if (location != null) {
             if (isNotEmpty()) append("\n")
@@ -964,7 +1051,7 @@ private fun addLocationOverlay(bitmap: Bitmap, location: String): Bitmap {
 }
 
 private fun saveImageToGallery(context: Context, bitmap: Bitmap, fileName: String) {
-    val picturesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "LandmarkRecognition")
+    val picturesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "BatikMotifRecognition")
     if (!picturesDir.exists()) {
         picturesDir.mkdirs()
     }
